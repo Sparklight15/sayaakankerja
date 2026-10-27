@@ -1,60 +1,81 @@
 <?php
 
 use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Str;
 use Livewire\Attributes\Layout;
 use Livewire\Volt\Component;
 
-new #[Layout('layouts.guest')] class extends Component
-{
+new #[Layout('layouts.guest')] class extends Component {
     public string $email = '';
 
+    public ?string $status = null;
+
     /**
-     * Send a password reset link to the provided email address.
+     * Kirim link reset password.
+     *
+     * Pesan yang tampil selalu sama, baik email terdaftar maupun tidak,
+     * supaya tidak membocorkan apakah sebuah email punya akun.
      */
     public function sendPasswordResetLink(): void
     {
+        $this->status = null;
+        $this->email = Str::lower(trim($this->email));
+
         $this->validate([
             'email' => ['required', 'string', 'email'],
         ]);
 
-        // We will send the password reset link to this user. Once we have attempted
-        // to send the link, we will examine the response then see the message we
-        // need to show to the user. Finally, we'll send out a proper response.
-        $status = Password::sendResetLink(
-            $this->only('email')
-        );
+        // Batas per IP: 5 permintaan per 10 menit.
+        // Dihitung di sini karena submit Livewire tidak melewati route /forgot-password.
+        $key = 'forgot-password|' . request()->ip();
 
-        if ($status != Password::RESET_LINK_SENT) {
-            $this->addError('email', __($status));
+        if (RateLimiter::tooManyAttempts($key, 5)) {
+            $seconds = RateLimiter::availableIn($key);
+
+            $this->addError('email', "Terlalu banyak permintaan. Coba lagi dalam {$seconds} detik.");
 
             return;
         }
 
+        RateLimiter::hit($key, 600);
+
+        // Hasil broker sengaja diabaikan (email tidak ditemukan atau dibatasi per email).
+        // Batas per email (60 detik) ditangani broker lewat config/auth.php.
+        Password::sendResetLink($this->only('email'));
+
         $this->reset('email');
 
-        session()->flash('status', __($status));
+        $this->status = 'Jika email terdaftar, kami telah mengirim link reset password.';
     }
 }; ?>
 
 <div>
     <div class="mb-4 text-sm text-gray-600">
-        {{ __('Forgot your password? No problem. Just let us know your email address and we will email you a password reset link that will allow you to choose a new one.') }}
+        Lupa password? Masukkan email akunmu, kami akan mengirim link untuk membuat password baru. Link berlaku 60
+        menit.
     </div>
 
-    <!-- Session Status -->
-    <x-auth-session-status class="mb-4" :status="session('status')" />
+    <!-- Pesan sukses -->
+    <x-auth-session-status class="mb-4" :status="$status" />
 
     <form wire:submit="sendPasswordResetLink">
-        <!-- Email Address -->
+        <!-- Email -->
         <div>
-            <x-input-label for="email" :value="__('Email')" />
-            <x-text-input wire:model="email" id="email" class="block mt-1 w-full" type="email" name="email" required autofocus />
+            <x-input-label for="email" value="Email" />
+            <x-text-input wire:model="email" id="email" class="block mt-1 w-full" type="email" name="email" required
+                autofocus />
             <x-input-error :messages="$errors->get('email')" class="mt-2" />
         </div>
 
-        <div class="flex items-center justify-end mt-4">
+        <div class="flex items-center justify-between mt-4">
+            <a class="underline text-sm text-gray-600 hover:text-gray-900 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                href="{{ route('login') }}" wire:navigate>
+                Kembali ke login
+            </a>
+
             <x-primary-button>
-                {{ __('Email Password Reset Link') }}
+                Kirim link reset
             </x-primary-button>
         </div>
     </form>
