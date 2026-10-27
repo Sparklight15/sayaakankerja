@@ -22,7 +22,16 @@ class LoginForm extends Form
     public bool $remember = false;
 
     /**
-     * Attempt to authenticate the request's credentials.
+     * Rapikan email sebelum divalidasi (sama seperti di Register).
+     */
+    public function normalize(): void
+    {
+        $this->email = Str::lower(trim($this->email));
+    }
+
+    /**
+     * Coba login. Pesan error sengaja generik supaya tidak
+     * membocorkan apakah sebuah email terdaftar atau tidak.
      *
      * @throws ValidationException
      */
@@ -31,10 +40,10 @@ class LoginForm extends Form
         $this->ensureIsNotRateLimited();
 
         if (! Auth::attempt($this->only(['email', 'password']), $this->remember)) {
-            RateLimiter::hit($this->throttleKey());
+            RateLimiter::hit($this->throttleKey(), 60);
 
             throw ValidationException::withMessages([
-                'form.email' => trans('auth.failed'),
+                'form.email' => 'Email atau password salah.',
             ]);
         }
 
@@ -42,7 +51,7 @@ class LoginForm extends Form
     }
 
     /**
-     * Ensure the authentication request is not rate limited.
+     * Maksimal 5 percobaan gagal per menit per kombinasi email dan IP.
      */
     protected function ensureIsNotRateLimited(): void
     {
@@ -55,16 +64,10 @@ class LoginForm extends Form
         $seconds = RateLimiter::availableIn($this->throttleKey());
 
         throw ValidationException::withMessages([
-            'form.email' => trans('auth.throttle', [
-                'seconds' => $seconds,
-                'minutes' => ceil($seconds / 60),
-            ]),
+            'form.email' => "Terlalu banyak percobaan login. Coba lagi dalam {$seconds} detik.",
         ]);
     }
 
-    /**
-     * Get the authentication rate limiting throttle key.
-     */
     protected function throttleKey(): string
     {
         return Str::transliterate(Str::lower($this->email).'|'.request()->ip());
