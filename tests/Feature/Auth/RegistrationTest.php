@@ -3,15 +3,29 @@
 namespace Tests\Feature\Auth;
 
 use App\Models\User;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Http;
 use Livewire\Volt\Volt;
 
-function registerAs(string $email, string $password = 'password123', ?string $confirmation = null)
-{
+function registerAs(
+    string $email,
+    string $password = 'password123',
+    ?string $confirmation = null,
+    string $token = 'valid-token',
+    bool $fakeCloudflare = true,
+) {
+    if ($fakeCloudflare) {
+        Http::fake([
+            'challenges.cloudflare.com/*' => Http::response(['success' => true]),
+        ]);
+    }
+
     return Volt::test('pages.auth.register')
         ->set('email', $email)
         ->set('password', $password)
         ->set('password_confirmation', $confirmation ?? $password)
+        ->set('turnstileToken', $token)
         ->call('register');
 }
 
@@ -83,4 +97,50 @@ test('registration is limited to 5 per hour per IP', function () {
     registerAs('user6@example.com')->assertHasErrors(['email']);
 
     expect(User::where('email', 'user6@example.com')->exists())->toBeFalse();
+});
+
+test('registration fails without a turnstile token', function () {
+    registerAs('budi@example.com', token: '')
+        ->assertHasErrors(['turnstileToken' => 'required']);
+
+    Http::assertNothingSent();
+    expect(User::count())->toBe(0);
+});
+
+test('registration fails when cloudflare rejects the token', function () {
+    Http::fake([
+        'challenges.cloudflare.com/*' => Http::response([
+            'success' => false,
+            'error-codes' => ['invalid-input-response'],
+        ]),
+    ]);
+
+    registerAs('budi@example.com', fakeCloudflare: false)
+        ->assertHasErrors(['turnstileToken'])
+        ->assertDispatched('turnstile-reset');
+
+    $this->assertGuest();
+    expect(User::count())->toBe(0);
+});
+
+test('registration fails when cloudflare cannot be reached', function () {
+    Http::fake([
+        'challenges.cloudflare.com/*' => fn () => throw new ConnectionException('Cloudflare tidak bisa dihubungi'),
+    ]);
+
+    registerAs('budi@example.com', fakeCloudflare: false)
+        ->assertHasErrors(['turnstileToken']);
+
+    expect(User::count())->toBe(0);
+});
+
+test('token, secret key and IP are sent to cloudflare', function () {
+    config(['services.turnstile.secret_key' => 'rahasia-tes']);
+
+    registerAs('budi@example.com', token: 'token-abc')->assertHasNoErrors();
+
+    Http::assertSent(fn ($request) => $request->url() === 'https://challenges.cloudflare.com/turnstile/v0/siteverify'
+        && $request['secret'] === 'rahasia-tes'
+        && $request['response'] === 'token-abc'
+        && isset($request['remoteip']));
 });

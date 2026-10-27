@@ -3,6 +3,7 @@
 use App\Actions\GenerateUsername;
 use App\Actions\SeedDefaultOptions;
 use App\Models\User;
+use App\Rules\Turnstile;
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\RateLimiter;
@@ -17,6 +18,7 @@ new #[Layout('layouts.guest')] class extends Component {
     public string $email = '';
     public string $password = '';
     public string $password_confirmation = '';
+    public string $turnstileToken = '';
 
     /**
      * Handle an incoming registration request.
@@ -27,10 +29,24 @@ new #[Layout('layouts.guest')] class extends Component {
 
         $this->email = Str::lower(trim($this->email));
 
-        $validated = $this->validate([
-            'email' => ['required', 'string', 'email', 'max:255', 'unique:' . User::class],
-            'password' => ['required', 'string', 'confirmed', Rules\Password::min(8)],
-        ]);
+        try {
+            $validated = $this->validate(
+                [
+                    'email' => ['required', 'string', 'email', 'max:255', 'unique:' . User::class],
+                    'password' => ['required', 'string', 'confirmed', Rules\Password::min(8)],
+                    'turnstileToken' => ['required', new Turnstile()],
+                ],
+                [
+                    'turnstileToken.required' => 'Selesaikan verifikasi keamanan terlebih dahulu.',
+                ],
+            );
+        } catch (ValidationException $e) {
+            // Token Turnstile hanya berlaku sekali, jadi widget harus diulang.
+            $this->turnstileToken = '';
+            $this->dispatch('turnstile-reset');
+
+            throw $e;
+        }
 
         RateLimiter::hit($this->throttleKey(), 3600);
 
@@ -112,6 +128,37 @@ new #[Layout('layouts.guest')] class extends Component {
                 <span x-text="show ? 'Sembunyikan password' : 'Tampilkan password'"></span>
             </button>
         </div>
+
+        <!-- Cloudflare Turnstile -->
+        <div class="mt-4" wire:ignore x-data="{
+            widgetId: null,
+            loadScript() {
+                window.turnstileReady = window.turnstileReady || new Promise((resolve) => {
+                    if (window.turnstile) { resolve(); return; }
+                    const script = document.createElement('script');
+                    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+                    script.async = true;
+                    script.onload = () => resolve();
+                    document.head.appendChild(script);
+                });
+                return window.turnstileReady;
+            },
+            async init() {
+                await this.loadScript();
+                this.widgetId = window.turnstile.render(this.$refs.widget, {
+                    sitekey: '{{ config('services.turnstile.site_key') }}',
+                    callback: (token) => this.$wire.set('turnstileToken', token, false),
+                    'expired-callback': () => this.$wire.set('turnstileToken', '', false),
+                    'error-callback': () => this.$wire.set('turnstileToken', '', false),
+                });
+            },
+            reset() {
+                if (this.widgetId !== null) { window.turnstile.reset(this.widgetId); }
+            }
+        }" x-on:turnstile-reset.window="reset()">
+            <div x-ref="widget"></div>
+        </div>
+        <x-input-error :messages="$errors->get('turnstileToken')" class="mt-2" />
 
         <div class="flex items-center justify-end mt-4">
             <a class="underline text-sm text-gray-600 hover:text-gray-900 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
