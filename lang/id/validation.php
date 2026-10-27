@@ -17,5 +17,7 @@ return [
         'password' => 'password',
         'password_confirmation' => 'konfirmasi password',
         'username' => 'username',
+        'form.email' => 'email',
+        'form.password' => 'password',
     ],
 ];
