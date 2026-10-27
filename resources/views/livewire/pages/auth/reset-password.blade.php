@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Auth\Events\PasswordReset;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Session;
@@ -10,22 +11,26 @@ use Livewire\Attributes\Layout;
 use Livewire\Attributes\Locked;
 use Livewire\Volt\Component;
 
-new #[Layout('layouts.guest')] class extends Component
-{
+new #[Layout('layouts.guest')] class extends Component {
     #[Locked]
     public string $token = '';
+
+    #[Locked]
     public string $email = '';
+
     public string $password = '';
     public string $password_confirmation = '';
 
     /**
      * Mount the component.
+     *
+     * Email dibaca dari query string (?email=...) pada link di email reset.
+     * Parameter $email opsional dipakai oleh tes supaya tidak bergantung pada request.
      */
-    public function mount(string $token): void
+    public function mount(string $token, ?string $email = null): void
     {
         $this->token = $token;
-
-        $this->email = request()->string('email');
+        $this->email = Str::lower(trim((string) ($email ?? request()->query('email', ''))));
     }
 
     /**
@@ -33,72 +38,97 @@ new #[Layout('layouts.guest')] class extends Component
      */
     public function resetPassword(): void
     {
-        $this->validate([
-            'token' => ['required'],
-            'email' => ['required', 'string', 'email'],
-            'password' => ['required', 'string', 'confirmed', Rules\Password::defaults()],
-        ]);
-
-        // Here we will attempt to reset the user's password. If it is successful we
-        // will update the password on an actual user model and persist it to the
-        // database. Otherwise we will parse the error and return the response.
-        $status = Password::reset(
-            $this->only('email', 'password', 'password_confirmation', 'token'),
-            function ($user) {
-                $user->forceFill([
-                    'password' => Hash::make($this->password),
-                    'remember_token' => Str::random(60),
-                ])->save();
-
-                event(new PasswordReset($user));
-            }
+        $this->validate(
+            [
+                'password' => ['required', 'string', 'confirmed', Rules\Password::min(8)],
+            ],
+            [],
+            [
+                'password' => 'password baru',
+            ],
         );
 
-        // If the password was successfully reset, we will redirect the user back to
-        // the application's home authenticated view. If there is an error we can
-        // redirect them back to where they came from with their error message.
-        if ($status != Password::PASSWORD_RESET) {
-            $this->addError('email', __($status));
+        $status = Password::reset(
+            [
+                'email' => $this->email,
+                'password' => $this->password,
+                'password_confirmation' => $this->password_confirmation,
+                'token' => $this->token,
+            ],
+            function ($user) {
+                $user
+                    ->forceFill([
+                        'password' => Hash::make($this->password),
+                        'password_changed_at' => now(),
+                        'remember_token' => Str::random(60),
+                    ])
+                    ->save();
+
+                // Hapus semua sesi lain milik user ini (session driver = database)
+                DB::table('sessions')->where('user_id', $user->getKey())->delete();
+
+                event(new PasswordReset($user));
+            },
+        );
+
+        if ($status === Password::PASSWORD_RESET) {
+            Session::flash('status', 'Password berhasil diubah, silakan login.');
+
+            $this->redirectRoute('login', navigate: true);
 
             return;
         }
 
-        Session::flash('status', __($status));
-
-        $this->redirectRoute('login', navigate: true);
+        // Pesan sengaja dibuat sama untuk token salah, token kedaluwarsa, dan email tidak dikenal
+        $this->addError('form', $status === Password::RESET_THROTTLED ? 'Terlalu banyak percobaan. Silakan tunggu sebentar lalu coba lagi.' : 'Link reset password tidak valid atau sudah kedaluwarsa. Silakan minta link baru.');
     }
 }; ?>
 
 <div>
     <form wire:submit="resetPassword">
-        <!-- Email Address -->
+        <!-- Error umum (token tidak valid / kedaluwarsa) -->
+        @error('form')
+            <div class="mb-4 text-sm text-red-600">
+                {{ $message }}
+                <a href="{{ route('password.request') }}" wire:navigate class="underline">Minta link baru</a>
+            </div>
+        @enderror
+
+        <!-- Email (terkunci) -->
         <div>
-            <x-input-label for="email" :value="__('Email')" />
-            <x-text-input wire:model="email" id="email" class="block mt-1 w-full" type="email" name="email" required autofocus autocomplete="username" />
-            <x-input-error :messages="$errors->get('email')" class="mt-2" />
+            <x-input-label for="email" value="Email" />
+            <x-text-input id="email" class="block mt-1 w-full bg-gray-100" type="email" name="email"
+                :value="$email" readonly autocomplete="username" />
         </div>
 
-        <!-- Password -->
-        <div class="mt-4">
-            <x-input-label for="password" :value="__('Password')" />
-            <x-text-input wire:model="password" id="password" class="block mt-1 w-full" type="password" name="password" required autocomplete="new-password" />
-            <x-input-error :messages="$errors->get('password')" class="mt-2" />
-        </div>
+        <div x-data="{ show: false }">
+            <!-- Password baru -->
+            <div class="mt-4">
+                <x-input-label for="password" value="Password baru" />
+                <div class="relative">
+                    <x-text-input wire:model="password" id="password" class="block mt-1 w-full pr-16"
+                        x-bind:type="show ? 'text' : 'password'" name="password" required autofocus
+                        autocomplete="new-password" />
+                    <button type="button" x-on:click="show = !show"
+                        class="absolute inset-y-0 right-0 px-3 text-sm text-gray-500"
+                        x-text="show ? 'Sembunyikan' : 'Tampilkan'"></button>
+                </div>
+                <p class="mt-1 text-xs text-gray-500">Minimal 8 karakter.</p>
+                <x-input-error :messages="$errors->get('password')" class="mt-2" />
+            </div>
 
-        <!-- Confirm Password -->
-        <div class="mt-4">
-            <x-input-label for="password_confirmation" :value="__('Confirm Password')" />
-
-            <x-text-input wire:model="password_confirmation" id="password_confirmation" class="block mt-1 w-full"
-                          type="password"
-                          name="password_confirmation" required autocomplete="new-password" />
-
-            <x-input-error :messages="$errors->get('password_confirmation')" class="mt-2" />
+            <!-- Konfirmasi password -->
+            <div class="mt-4">
+                <x-input-label for="password_confirmation" value="Konfirmasi password baru" />
+                <x-text-input wire:model="password_confirmation" id="password_confirmation" class="block mt-1 w-full"
+                    x-bind:type="show ? 'text' : 'password'" name="password_confirmation" required
+                    autocomplete="new-password" />
+            </div>
         </div>
 
         <div class="flex items-center justify-end mt-4">
             <x-primary-button>
-                {{ __('Reset Password') }}
+                Ubah Password
             </x-primary-button>
         </div>
     </form>
